@@ -360,7 +360,15 @@ def build_alert(available, generic_only):
         + f"\n\nBuy here → {TARGET_URL}\n"
         + f"(Checked {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')} — move fast.)"
     )
-    short = f"AVAILABLE: {TARGET_NAME} — {names_short}. Buy: {TARGET_URL}"
+    # SMS must stay GSM-7-safe ASCII and fit one 160-char segment (with room
+    # for a "[TEST] " prefix), or carrier gateways re-encode/truncate and cut
+    # the link. URL goes last and is never trimmed.
+    sms_url = env_str("TARGET_SHORT_URL", TARGET_URL)
+    prefix = f"AVAILABLE: {names_short}".encode("ascii", "replace").decode()
+    budget = 150 - len(sms_url)
+    if len(prefix) > budget:
+        prefix = prefix[: budget - 3] + "..."
+    short = f"{prefix}. {sms_url}"
     if generic_only and not available:
         title = f"🎟️ May be available — {TARGET_NAME}"
     return title, body, short
