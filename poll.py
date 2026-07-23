@@ -131,7 +131,7 @@ def send_sms(short_message):
 
     gateways = [a.strip() for a in env_str("SMS_EMAIL_GATEWAY").split(",") if a.strip()]
     if gateways:
-        if smtp_send(gateways, "Alert", short_message):
+        if smtp_send(gateways, "", short_message):
             log(f"sms: sent via carrier email gateway to {len(gateways)} number(s)")
             sent = True
         else:
@@ -360,15 +360,14 @@ def build_alert(available, generic_only):
         + f"\n\nBuy here → {TARGET_URL}\n"
         + f"(Checked {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')} — move fast.)"
     )
-    # SMS must stay GSM-7-safe ASCII and fit one 160-char segment (with room
-    # for a "[TEST] " prefix), or carrier gateways re-encode/truncate and cut
-    # the link. URL goes last and is never trimmed.
-    sms_url = env_str("TARGET_SHORT_URL", TARGET_URL)
-    prefix = f"AVAILABLE: {names_short}".encode("ascii", "replace").decode()
-    budget = 150 - len(sms_url)
-    if len(prefix) > budget:
-        prefix = prefix[: budget - 3] + "..."
-    short = f"{prefix}. {sms_url}"
+    # SMS: same full URL as the email (it deep-links into the app; shortened
+    # forms don't), and it goes FIRST — carrier gateways prepend sender/subject
+    # text that counts against the segment limit, so anything near the end
+    # risks being split off. ASCII only (non-GSM chars force 70-char segments).
+    label = f"TICKETS: {names_short}".encode("ascii", "replace").decode()
+    if len(label) > 45:
+        label = label[:42] + "..."
+    short = f"{TARGET_URL} {label}"
     if generic_only and not available:
         title = f"🎟️ May be available — {TARGET_NAME}"
     return title, body, short
