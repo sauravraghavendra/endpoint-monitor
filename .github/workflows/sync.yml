@@ -1,0 +1,71 @@
+name: sync
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+    inputs:
+      test_notify:
+        description: "Send a test notification to every configured channel"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency:
+  group: sync
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 7
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Run
+        id: check
+        env:
+          TEST_NOTIFY: ${{ inputs.test_notify }}
+          LOOP_SECONDS: "260"
+          LOOP_INTERVAL: "60"
+          TARGET_ID: ${{ secrets.TARGET_ID }}
+          TARGET_NAME: ${{ secrets.TARGET_NAME }}
+          TARGET_URL: ${{ secrets.TARGET_URL }}
+          TARGET_API_URL: ${{ secrets.TARGET_API_URL }}
+          TARGET_DEADLINE_UTC: ${{ secrets.TARGET_DEADLINE_UTC }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          DISCORD_MENTION: ${{ vars.DISCORD_MENTION }}
+          SMTP_HOST: ${{ vars.SMTP_HOST }}
+          SMTP_PORT: ${{ vars.SMTP_PORT }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASS: ${{ secrets.SMTP_PASS }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+          SMS_EMAIL_GATEWAY: ${{ secrets.SMS_EMAIL_GATEWAY }}
+          TEXTBELT_KEY: ${{ secrets.TEXTBELT_KEY }}
+          TEXTBELT_PHONE: ${{ secrets.TEXTBELT_PHONE }}
+          TWILIO_ACCOUNT_SID: ${{ secrets.TWILIO_ACCOUNT_SID }}
+          TWILIO_AUTH_TOKEN: ${{ secrets.TWILIO_AUTH_TOKEN }}
+          TWILIO_FROM: ${{ secrets.TWILIO_FROM }}
+          TWILIO_TO: ${{ secrets.TWILIO_TO }}
+        run: python3 poll.py
+
+      - name: Persist
+        if: ${{ !inputs.test_notify }}
+        run: |
+          if [ -n "$(git status --porcelain .cache)" ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add .cache
+            git commit -m "$(date -u +%FT%TZ)"
+            git pull --rebase origin "${GITHUB_REF_NAME}" || true
+            git push
+          fi
+
+      - name: Wind down
+        if: steps.check.outputs.watch_ended == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow disable sync -R "$GITHUB_REPOSITORY"
