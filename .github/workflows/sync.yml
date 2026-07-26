@@ -21,7 +21,7 @@ concurrency:
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 7
+    timeout-minutes: 350
     steps:
       - uses: actions/checkout@v5
 
@@ -29,8 +29,12 @@ jobs:
         id: check
         env:
           TEST_NOTIFY: ${{ inputs.test_notify }}
-          LOOP_SECONDS: "260"
+          # The 5-min cron is throttled to ~hourly in practice, so each run
+          # polls for ~5.7h and the next queued run takes over when it ends —
+          # continuous ~1/min coverage. State is pushed mid-run on change.
+          LOOP_SECONDS: "20400"
           LOOP_INTERVAL: "60"
+          COMMIT_ON_SAVE: "true"
           TARGET_ID: ${{ secrets.TARGET_ID }}
           TARGET_NAME: ${{ secrets.TARGET_NAME }}
           TARGET_URL: ${{ secrets.TARGET_URL }}

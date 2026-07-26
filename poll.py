@@ -6,6 +6,7 @@ import json
 import os
 import smtplib
 import ssl
+import subprocess
 import sys
 import time
 import urllib.error
@@ -324,6 +325,26 @@ def load_state():
         return dict(DEFAULT_STATE)
 
 
+def commit_state():
+    """Commit + push the state file from inside a long-running job, so state
+    survives even if the runner dies mid-loop. Best-effort; never raises."""
+    def git(*args):
+        return subprocess.run(["git", *args], check=False, capture_output=True, text=True)
+
+    try:
+        if not git("status", "--porcelain", STATE_FILE).stdout.strip():
+            return
+        git("config", "user.name", "github-actions[bot]")
+        git("config", "user.email", "41898282+github-actions[bot]@users.noreply.github.com")
+        git("add", STATE_FILE)
+        git("commit", "-m", datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
+        git("pull", "--rebase", "origin", "main")
+        rc = git("push", "origin", "HEAD:main").returncode
+        log(f"state: committed (push rc={rc})")
+    except Exception as e:  # noqa: BLE001
+        log(f"state commit failed: {type(e).__name__}")
+
+
 def save_state(state, previous_serialized):
     serialized = serialize(state)
     if serialized != previous_serialized:
@@ -331,6 +352,8 @@ def save_state(state, previous_serialized):
         with open(STATE_FILE, "w", encoding="utf-8") as f:
             f.write(encoded + "\n")
         log("state: updated on disk")
+        if env_str("COMMIT_ON_SAVE") == "true":
+            commit_state()
     else:
         log("state: unchanged")
 
@@ -456,16 +479,27 @@ def main():
     if state["keepalive"] != month:
         state["keepalive"] = month
 
-    # The scheduler won't fire more often than every ~5 minutes, so a single
-    # invocation polls repeatedly until LOOP_SECONDS runs out (0 = one check).
-    # On any state change we stop early so the workflow commits it promptly.
+    # The scheduler throttles 5-minute crons to roughly hourly, so each
+    # invocation polls continuously until LOOP_SECONDS runs out (0 = one
+    # check) and the next queued run takes over on exit. State changes are
+    # persisted the moment they happen, not at the end of the run.
     loop_seconds = int(env_str("LOOP_SECONDS", "0"))
     interval = max(30, int(env_str("LOOP_INTERVAL", "60")))
     deadline = time.monotonic() + loop_seconds
     while True:
-        run_check(state)
-        if serialize(state) != previous_serialized:
+        if WATCH_END_UTC and datetime.now(timezone.utc) >= WATCH_END_UTC:
+            state["ended"] = True
+            notify_info(
+                f"🏁 Watch ended — {TARGET_NAME}",
+                "The deadline has passed. This watcher is shutting itself off.",
+            )
+            set_github_output("watch_ended", "true")
             break
+        run_check(state)
+        serialized = serialize(state)
+        if serialized != previous_serialized:
+            save_state(state, previous_serialized)
+            previous_serialized = serialized
         if time.monotonic() + interval > deadline:
             break
         time.sleep(interval)
