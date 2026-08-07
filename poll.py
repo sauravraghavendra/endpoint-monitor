@@ -2,6 +2,7 @@
 """Polls a JSON endpoint and notifies configured channels when availability changes."""
 
 import base64
+import http.cookiejar
 import json
 import os
 import smtplib
@@ -43,7 +44,9 @@ USER_AGENT = (
     "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
 )
 
-FAILURE_WARN_THRESHOLD = 3  # consecutive failed runs before warning ping
+# Eventbrite intermittently 403s datacenter IPs for a few minutes at a time.
+# Only page after a sustained outage, not a passing burst.
+FAILURE_WARN_THRESHOLD = int(os.environ.get("FAILURE_WARN_THRESHOLD", "10") or "10")
 
 
 def log(msg):
@@ -204,17 +207,30 @@ def notify_info(title, body):
 
 def fetch_target():
     api = urllib.parse.urlsplit(TARGET_API_URL)
+    origin = f"{api.scheme}://{api.netloc}"
     headers = {
         "User-Agent": USER_AGENT,
-        "Accept": "application/json",
+        "Accept": "application/json, text/plain, */*",
         "Accept-Language": "en-US,en;q=0.9",
-        "Referer": f"{api.scheme}://{api.netloc}/checkout-external?eid={TARGET_ID}",
+        "Referer": f"{origin}/checkout-external?eid={TARGET_ID}",
+        "sec-ch-ua": '"Chromium";v="126", "Not)A;Brand";v="24", "Google Chrome";v="126"',
+        "sec-ch-ua-mobile": "?0",
+        "sec-ch-ua-platform": '"Windows"',
+        "Sec-Fetch-Dest": "empty",
+        "Sec-Fetch-Mode": "cors",
+        "Sec-Fetch-Site": "same-origin",
     }
+    # Backoffs are generous: a 403 burst clears on its own in a few minutes,
+    # and retrying hard would only deepen the block.
+    backoffs = [5, 15, 30, 60]
     last_err = None
-    for attempt in range(1, 4):
+    for attempt in range(1, len(backoffs) + 2):
         try:
+            opener = urllib.request.build_opener(
+                urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar())
+            )
             req = urllib.request.Request(TARGET_API_URL, headers=headers)
-            with urllib.request.urlopen(req, timeout=30) as resp:
+            with opener.open(req, timeout=30) as resp:
                 raw = resp.read().decode("utf-8", "replace")
             data = json.loads(raw)
             if "tickets" not in data and "ticketAvailabilityInfo" not in data:
@@ -222,9 +238,10 @@ def fetch_target():
             return data
         except Exception as e:  # noqa: BLE001
             last_err = e
-            log(f"fetch attempt {attempt} failed: {type(e).__name__}")
-            if attempt < 3:
-                time.sleep(10 * attempt)
+            code = getattr(e, "code", "")
+            log(f"fetch attempt {attempt} failed: {type(e).__name__} {code}")
+            if attempt <= len(backoffs):
+                time.sleep(backoffs[attempt - 1])
     raise RuntimeError(f"all fetch attempts failed: {type(last_err).__name__}: {last_err}")
 
 
@@ -500,9 +517,11 @@ def main():
         if serialized != previous_serialized:
             save_state(state, previous_serialized)
             previous_serialized = serialized
-        if time.monotonic() + interval > deadline:
+        # While the source is refusing us, ease off rather than hammer it.
+        wait = interval * min(4, 1 + state["consecutive_failures"])
+        if time.monotonic() + wait > deadline:
             break
-        time.sleep(interval)
+        time.sleep(wait)
     save_state(state, previous_serialized)
 
 
