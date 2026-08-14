@@ -61,6 +61,7 @@ jobs:
           TARGET_URL: ${{ secrets.TARGET_URL }}
           TARGET_API_URL: ${{ secrets.TARGET_API_URL }}
           TARGET_DEADLINE_UTC: ${{ secrets.TARGET_DEADLINE_UTC }}
+          TICKET_FILTER: ${{ secrets.TICKET_FILTER }}
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
           DISCORD_MENTION: ${{ vars.DISCORD_MENTION }}
           SMTP_HOST: ${{ vars.SMTP_HOST }}

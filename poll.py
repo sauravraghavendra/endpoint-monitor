@@ -5,6 +5,7 @@ import base64
 import http.cookiejar
 import json
 import os
+import re
 import smtplib
 import ssl
 import subprocess
@@ -38,6 +39,12 @@ WATCH_END_UTC = (
 )
 
 STATE_FILE = env_str("STATE_FILE", ".cache")
+
+# Only these ticket names are watched. The organizer continuously stages
+# unrelated side-event registrations on this listing; matching everything
+# meant alerting on tickets that were not even on sale. Case-insensitive
+# regex; empty string watches everything.
+TICKET_FILTER = env_str("TICKET_FILTER", "admission")
 
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -255,15 +262,28 @@ def fmt_price(item):
     return "free/unpriced"
 
 
+def is_watched(name):
+    if not TICKET_FILTER:
+        return True
+    try:
+        return re.search(TICKET_FILTER, name, re.I) is not None
+    except re.error:  # a malformed filter must not silence the watcher
+        return TICKET_FILTER.lower() in name.lower()
+
+
 def parse_state(data):
     items = data.get("tickets") or []
     info = data.get("ticketAvailabilityInfo") or {}
     classes = {}
     available = []
+    ignored = 0
     for t in items:
         if not isinstance(t, dict):
             continue
         name = str(t.get("name") or "Unnamed")
+        if not is_watched(name):
+            ignored += 1
+            continue
         status = str(t.get("on_sale_status") or "UNKNOWN")
         hidden = bool((t.get("characteristics") or {}).get("is_hidden"))
         entry = {"status": status, "price": fmt_price(t), "hidden": hidden}
@@ -271,33 +291,26 @@ def parse_state(data):
         if status == "AVAILABLE" and not hidden:
             available.append((name, entry["price"]))
 
+    # Event-level counters (remaining_capacity in particular) move whenever the
+    # organizer stages any ticket, on sale or not, so they are recorded for
+    # context but deliberately kept out of the change fingerprint.
     fingerprint = {
         "has_access_code": bool((data.get("event") or {}).get("has_access_code")),
         "is_sold_out": bool(info.get("is_sold_out")),
         "has_available_tickets": bool(info.get("has_available_tickets")),
-        "has_available_hidden_tickets": bool(info.get("has_available_hidden_tickets")),
-        "waitlist_enabled": bool(info.get("waitlist_enabled")),
-        "remaining_capacity": info.get("remaining_capacity"),
         "classes": classes,
     }
-    generic_available = bool(info.get("has_available_tickets")) or (
-        isinstance(info.get("remaining_capacity"), int) and info["remaining_capacity"] > 0
-    )
-    return fingerprint, available, generic_available
+    # Only fall back to the event-level flag when no ticket list is visible at
+    # all; when there is a list, per-ticket on_sale_status is authoritative.
+    generic_available = (not items) and bool(info.get("has_available_tickets"))
+    return fingerprint, available, generic_available, ignored
 
 
 def describe_change(old, new):
     if not old:
         return ["First successful check."]
     lines = []
-    for flag in (
-        "has_access_code",
-        "is_sold_out",
-        "has_available_tickets",
-        "has_available_hidden_tickets",
-        "waitlist_enabled",
-        "remaining_capacity",
-    ):
+    for flag in ("has_access_code", "is_sold_out", "has_available_tickets"):
         if old.get(flag) != new.get(flag):
             lines.append(f"{flag}: {old.get(flag)} -> {new.get(flag)}")
     oc, nc = old.get("classes") or {}, new.get("classes") or {}
@@ -436,11 +449,12 @@ def run_check(state):
         state["consecutive_failures"] = 0
         state["failure_warned"] = False
 
-    fingerprint, available, generic_available = parse_state(data)
+    fingerprint, available, generic_available, ignored = parse_state(data)
     available_names = [name for name, _ in available]
     log(
-        f"check ok: {len(fingerprint['classes'])} listed, {len(available)} available, "
-        f"open={fingerprint['has_available_tickets']}, gated={fingerprint['has_access_code']}"
+        f"check ok: {len(fingerprint['classes'])} watched, {len(available)} available, "
+        f"{ignored} ignored, open={fingerprint['has_available_tickets']}, "
+        f"gated={fingerprint['has_access_code']}"
     )
 
     newly_available = [n for n in available_names if n not in state["alerted_names"]]
