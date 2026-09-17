@@ -40,11 +40,15 @@ WATCH_END_UTC = (
 
 STATE_FILE = env_str("STATE_FILE", ".cache")
 
-# Only these ticket names are watched. The organizer continuously stages
-# unrelated side-event registrations on this listing; matching everything
-# meant alerting on tickets that were not even on sale. Case-insensitive
-# regex; empty string watches everything.
-TICKET_FILTER = env_str("TICKET_FILTER", "admission")
+# Two scopes, each a case-insensitive regex over ticket names (empty = all):
+#   TICKET_FILTER  names that may raise a FULL alert (Discord + email + SMS),
+#                  and only once such a ticket is actually AVAILABLE.
+#   TRACK_FILTER   names whose routine status changes earn a quiet Discord
+#                  ping. Deliberately narrower: the organizer stages dozens of
+#                  side-event registrations, and tracking every one produced
+#                  per-minute pings on 2026-08-14.
+TICKET_FILTER = env_str("TICKET_FILTER", "admission|competitor")
+TRACK_FILTER = env_str("TRACK_FILTER", "") or TICKET_FILTER
 
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -262,13 +266,13 @@ def fmt_price(item):
     return "free/unpriced"
 
 
-def is_watched(name):
-    if not TICKET_FILTER:
+def _matches(name, pattern):
+    if not pattern:
         return True
     try:
-        return re.search(TICKET_FILTER, name, re.I) is not None
+        return re.search(pattern, name, re.I) is not None
     except re.error:  # a malformed filter must not silence the watcher
-        return TICKET_FILTER.lower() in name.lower()
+        return pattern.lower() in name.lower()
 
 
 def parse_state(data):
@@ -281,14 +285,17 @@ def parse_state(data):
         if not isinstance(t, dict):
             continue
         name = str(t.get("name") or "Unnamed")
-        if not is_watched(name):
+        alertable = _matches(name, TICKET_FILTER)
+        trackable = _matches(name, TRACK_FILTER)
+        if not (alertable or trackable):
             ignored += 1
             continue
         status = str(t.get("on_sale_status") or "UNKNOWN")
         hidden = bool((t.get("characteristics") or {}).get("is_hidden"))
         entry = {"status": status, "price": fmt_price(t), "hidden": hidden}
-        classes[name] = entry
-        if status == "AVAILABLE" and not hidden:
+        if trackable:
+            classes[name] = entry
+        if alertable and status == "AVAILABLE" and not hidden:
             available.append((name, entry["price"]))
 
     # Event-level counters (remaining_capacity in particular) move whenever the
